@@ -46,11 +46,20 @@ class PaperSession:
         self._funding: dict[str, dict] = {}
         self._marks: dict[str, float] = {}
         self._log: list[dict] = []
+        self.max_leverage = 1.0
+        self.confidence_leverage = False
         self._stop_flag = threading.Event()
         self._lock = threading.Lock()
 
     # ------------------------------------------------------------------ start
-    def start(self, capital: float, symbols: list[str], timeframe: str) -> None:
+    def start(
+        self,
+        capital: float,
+        symbols: list[str],
+        timeframe: str,
+        max_leverage: float = 1.0,
+        confidence_leverage: bool = False,
+    ) -> None:
         """Validate, then boot the session on its own thread."""
         if self.status in ("starting", "running"):
             raise RuntimeError("a session is already running; stop it first")
@@ -64,9 +73,13 @@ class PaperSession:
         if timeframe not in _INTERVALS:
             raise ValueError(f"timeframe must be one of {sorted(_INTERVALS)}")
 
+        if not 1.0 <= max_leverage <= 125.0:
+            raise ValueError("max leverage must be between 1 and 125")
         self.capital = float(capital)
         self.symbols = list(symbols)
         self.timeframe = timeframe
+        self.max_leverage = float(max_leverage)
+        self.confidence_leverage = bool(confidence_leverage)
         self.status = "starting"
         self.error = ""
         self._stop_flag.clear()
@@ -102,9 +115,15 @@ class PaperSession:
         from quantdesk.execution.paper_broker import PaperBroker
 
         base = get_settings()
-        settings = base.model_copy(
-            update={"timeframe": self.timeframe, "starting_equity": self.capital}
-        )
+        settings = base.model_copy(update={
+            "timeframe": self.timeframe,
+            "starting_equity": self.capital,
+            "max_leverage": self.max_leverage,
+            "confidence_leverage": self.confidence_leverage,
+            # With confidence sizing on, the flat figure is unused; kept at 1x so a
+            # misconfiguration cannot silently leverage everything.
+            "leverage": 1.0 if self.confidence_leverage else self.max_leverage,
+        })
         feed = BinancePerpsFeed(self.symbols, self.timeframe, poll_seconds=10)
         broker = PaperBroker(
             starting_equity=self.capital,
@@ -129,6 +148,18 @@ class PaperSession:
                 "BTCUSDT; check the symbols exist as USD-M contracts."
             )
         await desk.warmup(history)
+
+        # Per-contract maintenance margin drives the liquidation-distance cap. Without it
+        # every symbol falls back to the tier-1 default, which under-margins the exotics.
+        try:
+            from quantdesk.data.symbols import UNIVERSE
+
+            for symbol in self.symbols:
+                contract = UNIVERSE.get(symbol)
+                if contract is not None and contract.maint_margin_pct > 0:
+                    desk.pipeline.maint_margin[symbol] = contract.maint_margin_pct
+        except Exception as exc:  # noqa: BLE001 - fall back to the default, do not fail
+            log.warning("could not load contract margins: %s", exc)
 
         self.feed, self.broker, self.desk = feed, broker, desk
         self.started_at = datetime.now(timezone.utc)
@@ -190,6 +221,11 @@ class PaperSession:
                         "oi_last": interest[-1].contracts if interest else 0.0,
                     }
                 marks_now = self.feed.mark_prices() if self.feed else {}
+                # Confidence scores funding as a real, published cost of holding a
+                # direction, unlike every other input, which is an estimate.
+                if self.desk is not None:
+                    for symbol, payload in snapshot.items():
+                        self.desk.pipeline.funding_carry[symbol] = payload["carry"]
                 self._funding = snapshot
                 if marks_now:
                     self._marks = marks_now
@@ -284,6 +320,8 @@ class PaperSession:
             "started_at": self.started_at.isoformat() if self.started_at else None,
             "funding": self._funding,
             "marks": self._marks,
+            "max_leverage": self.max_leverage,
+            "confidence_leverage": self.confidence_leverage,
         }
         if self.broker is None or self.desk is None:
             out["log"] = []
@@ -296,6 +334,7 @@ class PaperSession:
             out["equity_curve"] = self._equity_block()
             out["results"] = self._results_block()
             out["trades"] = self._trades_block()
+            out["conviction"] = self._conviction_block()
         except Exception as exc:  # noqa: BLE001 - a display read must never raise
             log.debug("snapshot failed: %s", exc)
             out["snapshot_error"] = str(exc)
@@ -303,6 +342,46 @@ class PaperSession:
             out["log"] = list(self._log[-60:])
         return out
 
+    def _conviction_block(self) -> list[dict]:
+        """Latest confidence and leverage per symbol, with the breakdown kept.
+
+        The breakdown is the point: when a trade goes wrong the only useful question is
+        which piece of evidence was wrong, and a bare score cannot answer it.
+        """
+        pipeline = self.desk.pipeline
+        out = []
+        for symbol in self.symbols:
+            conf = pipeline.confidences.get(symbol)
+            lev = pipeline.leverages.get(symbol)
+            if conf is None and lev is None:
+                continue
+            row: dict = {"symbol": symbol}
+            if conf is not None:
+                row.update({
+                    "score": conf.score,
+                    "band": conf.band,
+                    "tradable": conf.tradable,
+                    "components": [
+                        {"name": k, "value": v, "weight": conf.weights.get(k, 0.0)}
+                        for k, v in sorted(
+                            conf.components.items(),
+                            key=lambda kv: -conf.weights.get(kv[0], 0.0),
+                        )
+                    ],
+                    "notes": list(conf.notes),
+                })
+            if lev is not None:
+                row.update({
+                    "leverage": lev.leverage,
+                    "requested": lev.requested,
+                    "binding": lev.binding,
+                    "capped": lev.capped,
+                    "stop_distance_pct": lev.stop_distance_pct,
+                    "liquidation_move_pct": lev.liquidation_move_pct,
+                    "liquidation_cap": lev.liquidation_cap,
+                })
+            out.append(row)
+        return out
     def _account_block(self) -> dict:
         ledger = self.broker.account_ledger
         equity = ledger.equity

@@ -100,10 +100,45 @@ class Handler(BaseHTTPRequestHandler):
 
                 focus = parse_qs(urlparse(self.path).query).get("focus", [None])[0]
             self._json(self.session.snapshot(focus))
+        elif path == "/api/symbols":
+            self._symbols()
         elif path == "/api/health":
             self._json({"ok": True, "status": self.session.status})
         else:
             self._json({"error": "not found"}, 404)
+
+    def _symbols(self) -> None:
+        """Search the tradeable perpetual universe.
+
+        Several hundred contracts, so results are capped and the query is required to be
+        short - this backs a search box, not a bulk export.
+        """
+        from urllib.parse import parse_qs, urlparse
+
+        params = parse_qs(urlparse(self.path).query)
+        needle = (params.get("q", [""])[0] or "")[:24]
+        quote = (params.get("quote", ["USDT"])[0] or "USDT")[:8].upper()
+        try:
+            from quantdesk.data.symbols import UNIVERSE
+
+            hits = UNIVERSE.search(needle, quote=quote, limit=60)
+            self._json({
+                "total": UNIVERSE.count,
+                "query": needle,
+                "results": [
+                    {
+                        "symbol": c.desk_symbol,
+                        "venue": c.symbol,
+                        "base": c.base,
+                        "quote": c.quote,
+                        "maint_margin_pct": c.maint_margin_pct,
+                        "margin_model_max_leverage": c.max_venue_leverage,
+                    }
+                    for c in hits
+                ],
+            })
+        except OSError as exc:
+            self._json({"error": f"could not reach the venue: {exc}"}, 503)
 
     def _serve_static(self, name: str, content_type: str) -> None:
         # Fixed filenames only. Joining a request path onto a directory is how a static
@@ -129,7 +164,11 @@ class Handler(BaseHTTPRequestHandler):
                     raw = raw.split(",")
                 symbols = [str(s).strip().upper() for s in raw if str(s).strip()]
                 timeframe = str(body.get("timeframe") or "1Min")
-                self.session.start(capital, symbols, timeframe)
+                max_leverage = float(body.get("max_leverage") or 1.0)
+                confidence_leverage = bool(body.get("confidence_leverage"))
+                self.session.start(
+                    capital, symbols, timeframe, max_leverage, confidence_leverage
+                )
                 self._json({"ok": True, "status": self.session.status})
             elif path == "/api/pause":
                 self._json({"ok": True, "paused": self.session.pause()})

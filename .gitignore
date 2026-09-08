@@ -2,11 +2,13 @@
 __pycache__/
 *.py[cod]
 .env
-data/
+# Anchored: unanchored 'data/' also matches quantdesk/data/, which is the package
+# holding every market data feed, and silently excluded it from the repository.
+/data/
 *.sqlite
 *.sqlite-journal
 *.log
-reports/
+/reports/
 .pytest_cache/
 .ruff_cache/
 

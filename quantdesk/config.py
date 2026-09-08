@@ -98,6 +98,15 @@ class Settings(BaseSettings):
     #: lets risk vary by 30x between trades depending on which limit binds, which stops
     #: a positive expectancy in R from compounding into money. See risk/money.py.
     risk_target_pct: float = 0.005
+    #: Ceiling on per-trade leverage when confidence sizing is enabled. This is a
+    #: *permission*, not a target: the liquidation-distance cap in alpha/confidence.py
+    #: reduces it whenever the protective stop would not survive the multiplier, so the
+    #: figure actually used is usually well below this. Leverage multiplies expectancy in
+    #: both directions and does not create edge; see the module docstring.
+    max_leverage: float = 20.0
+    #: Let confidence choose the leverage per trade, between 1x and max_leverage. When
+    #: False the flat `leverage` below is used for every trade.
+    confidence_leverage: bool = False
     #: Account leverage. 1.0 means cash trading, which is what an Alpaca crypto
     #: paper account is; see risk/money.py for why this changes which limit binds.
     leverage: float = 1.0

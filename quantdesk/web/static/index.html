@@ -64,6 +64,26 @@ text-overflow:ellipsis}
 .chip{font-size:11px;padding:2px 8px;border:1px solid var(--line);
 border-radius:10px;cursor:pointer;color:var(--dim)}
 .chip.on{color:var(--amber);border-color:var(--amber)}
+.picker{position:relative;display:inline-block}
+.results{position:absolute;top:100%;left:0;z-index:50;width:340px;max-height:280px;
+overflow-y:auto;background:#0b1017;border:1px solid var(--line);border-radius:4px;
+display:none;box-shadow:0 8px 24px rgba(0,0,0,.6)}
+.results.on{display:block}
+.results div{padding:5px 9px;cursor:pointer;display:flex;justify-content:space-between;
+gap:10px;border-bottom:1px solid #0e141c}
+.results div:hover{background:#1d2733}
+.results .sm{color:var(--dim);font-size:11px}
+.picked{display:flex;gap:5px;flex-wrap:wrap;align-items:center}
+.tag{font-size:11px;padding:2px 6px 2px 8px;border:1px solid var(--amber);
+color:var(--amber);border-radius:10px;display:inline-flex;gap:5px;align-items:center}
+.tag b{cursor:pointer;color:var(--down);font-weight:700}
+.pickS{width:150px}
+.chk{display:inline-flex;align-items:center;gap:5px;text-transform:none;
+font-size:11px;cursor:pointer}
+.bar{height:5px;background:#131b26;border-radius:3px;overflow:hidden;margin:2px 0 6px}
+.bar i{display:block;height:100%;background:var(--amber)}
+.comp{display:grid;grid-template-columns:1fr auto;gap:0 8px;font-size:11px}
+.comp span:nth-child(even){color:var(--dim);font-variant-numeric:tabular-nums}
 @media(max-width:1100px){main{grid-template-columns:1fr}}
 </style>
 </head>
@@ -80,8 +100,13 @@ border-radius:10px;cursor:pointer;color:var(--dim)}
 <div id="setup">
   <label for="cap">demo balance</label>
   <input id="cap" class="cap" value="100000" inputmode="decimal">
-  <label for="sym">perps</label>
-  <input id="sym" class="sym" value="BTC/USD,ETH/USD">
+  <label for="symSearch">perps</label>
+  <div class="picker">
+    <input id="symSearch" class="sym" placeholder="search 500+ coins: sol, pepe, wif..."
+           autocomplete="off">
+    <div id="symResults" class="results"></div>
+  </div>
+  <div id="picked" class="picked"></div>
   <label for="tf">bars</label>
   <select id="tf">
     <option value="1Min">1 minute</option>
@@ -89,6 +114,19 @@ border-radius:10px;cursor:pointer;color:var(--dim)}
     <option value="15Min">15 minutes</option>
     <option value="1Hour">1 hour</option>
   </select>
+  <label for="lev">max lev</label>
+  <select id="lev" class="pickS">
+    <option value="1">1x (no leverage)</option>
+    <option value="3">3x</option>
+    <option value="5">5x</option>
+    <option value="10" selected>10x</option>
+    <option value="20">20x</option>
+    <option value="50">50x</option>
+    <option value="100">100x</option>
+  </select>
+  <label for="confLev" class="chk">
+    <input type="checkbox" id="confLev" checked> confidence picks lev
+  </label>
   <button class="go" id="start">START SESSION</button>
   <button id="pause" disabled>PAUSE ENTRIES</button>
   <button class="stop" id="kill" disabled>KILL</button>
@@ -137,6 +175,10 @@ border-radius:10px;cursor:pointer;color:var(--dim)}
       <table><thead><tr>
         <th>symbol</th><th>qty</th><th>avg</th><th>last</th><th>unreal</th>
       </tr></thead><tbody id="pos"></tbody></table>
+    </div>
+    <div class="card">
+      <h2>conviction &amp; leverage</h2>
+      <div class="body" id="conviction"><span class="dim">waiting...</span></div>
     </div>
     <div class="card">
       <h2>funding <span class="dim">live</span></h2>
@@ -402,6 +444,43 @@ function render(s) {
         fmt(t.fees) + "</td><td class='dim'>" + t.closed + "</td></tr>").join("")
     : "<tr><td class='dim' colspan='8'>no round trip has completed yet</td></tr>";
 
+  // ---- conviction and leverage ----
+  const cv = s.conviction || [];
+  $("conviction").innerHTML = cv.length ? cv.map(c => {
+    const pctScore = Math.round((c.score || 0) * 100);
+    const bandCls = c.tradable ? (c.score >= 0.65 ? "up" : "amber") : "down";
+    let html = "<div style='margin-bottom:12px'>" +
+      "<div><span class='amber'>" + c.symbol + "</span> " +
+      "<span class='" + bandCls + "'>" + pctScore + "% " + (c.band || "") + "</span></div>" +
+      "<div class='bar'><i style='width:" + pctScore + "%'></i></div>";
+    if (c.leverage != null) {
+      const cap = c.capped;
+      html += "<dl class='kv'>" +
+        "<dt>leverage</dt><dd class='amber'>" + c.leverage.toFixed(1) + "x</dd>" +
+        "<dt>asked for</dt><dd class='" + (cap ? "down" : "dim") + "'>" +
+          c.requested.toFixed(1) + "x</dd>" +
+        "<dt>decided by</dt><dd>" + c.binding + "</dd>" +
+        "<dt>stop is</dt><dd>" + (c.stop_distance_pct * 100).toFixed(2) + "% away</dd>" +
+        "<dt>liquidation</dt><dd class='down'>" +
+          (c.liquidation_move_pct * 100).toFixed(2) + "% adverse</dd>" +
+        "</dl>";
+      if (cap) {
+        html += "<div class='note' style='padding:4px 0'>the stop would not survive " +
+                c.requested.toFixed(0) + "x, so it was cut to " +
+                c.leverage.toFixed(1) + "x</div>";
+      }
+    }
+    if (c.components && c.components.length) {
+      html += "<div class='comp'>" + c.components.map(k =>
+        "<span>" + k.name + "</span><span>" + k.value.toFixed(2) +
+        " x" + k.weight.toFixed(2) + "</span>").join("") + "</div>";
+    }
+    (c.notes || []).forEach(n => {
+      html += "<div class='note' style='padding:2px 0'>" + n + "</div>";
+    });
+    return html + "</div>";
+  }).join("") : "<span class='dim'>no symbol has been scored yet</span>";
+
   const fd = s.funding || {};
   const keys = Object.keys(fd);
   $("funding").innerHTML = keys.length ? keys.map(k => {
@@ -497,6 +576,60 @@ async function post(path, body) {
   }
 }
 
+// ---- symbol search -------------------------------------------------------
+let picked = ["BTC/USDT", "ETH/USDT"];
+let searchTimer = null;
+
+function drawPicked() {
+  $("picked").innerHTML = picked.map(s =>
+    "<span class='tag'>" + s + " <b data-s='" + s + "'>x</b></span>").join("")
+    || "<span class='dim'>pick at least one</span>";
+  [...$("picked").querySelectorAll("b")].forEach(b => {
+    b.onclick = () => { picked = picked.filter(x => x !== b.dataset.s); drawPicked(); };
+  });
+}
+
+async function searchSymbols(q) {
+  try {
+    const res = await fetch("/api/symbols?q=" + encodeURIComponent(q));
+    const data = await res.json();
+    if (data.error) {
+      $("symResults").innerHTML = "<div class='dim'>" + data.error + "</div>";
+      $("symResults").className = "results on";
+      return;
+    }
+    $("symResults").innerHTML = data.results.map(r =>
+      "<div data-s='" + r.symbol + "'><span>" + r.base +
+      " <span class='sm'>" + r.symbol + "</span></span>" +
+      "<span class='sm'>maint " + (r.maint_margin_pct * 100).toFixed(2) + "%</span></div>"
+    ).join("") || "<div class='dim'>no match</div>";
+    $("symResults").className = "results on";
+    [...$("symResults").querySelectorAll("div[data-s]")].forEach(d => {
+      d.onclick = () => {
+        if (!picked.includes(d.dataset.s)) picked.push(d.dataset.s);
+        drawPicked();
+        $("symSearch").value = "";
+        $("symResults").className = "results";
+      };
+    });
+  } catch (e) {
+    $("symResults").innerHTML = "<div class='dim'>search unavailable</div>";
+    $("symResults").className = "results on";
+  }
+}
+
+$("symSearch").oninput = e => {
+  clearTimeout(searchTimer);
+  const q = e.target.value;
+  // Debounced: several hundred contracts should not be filtered per keystroke.
+  searchTimer = setTimeout(() => searchSymbols(q), 180);
+};
+$("symSearch").onfocus = () => searchSymbols($("symSearch").value);
+document.addEventListener("click", e => {
+  if (!e.target.closest(".picker")) $("symResults").className = "results";
+});
+drawPicked();
+
 $("start").onclick = () => {
   const cap = $("cap").value.replace(/,/g, "");
   if (!(parseFloat(cap) > 0)) {
@@ -504,12 +637,19 @@ $("start").onclick = () => {
     $("msg").className = "down";
     return;
   }
+  if (!picked.length) {
+    $("msg").textContent = "pick at least one coin";
+    $("msg").className = "down";
+    return;
+  }
   focus = null;
   $("msg").textContent = "connecting to Binance and warming up indicators...";
   post("/api/start", {
     capital: cap,
-    symbols: $("sym").value,
+    symbols: picked.join(","),
     timeframe: $("tf").value,
+    max_leverage: parseFloat($("lev").value),
+    confidence_leverage: $("confLev").checked,
   });
 };
 $("pause").onclick = () => post("/api/pause");

@@ -32,6 +32,13 @@ from datetime import datetime
 
 from quantdesk.agents.base import AgentContext, RegimeAgent, RegimeView, SignalAgent
 from quantdesk.alpha.blender import SignalBlender
+from quantdesk.alpha.confidence import (
+    Confidence,
+    Evidence,
+    LeverageDecision,
+    decide_leverage,
+    score_confidence,
+)
 from quantdesk.analysis.checklist import TechnicalChecklist, Verdict
 from quantdesk.analysis.patterns import Bias
 from quantdesk.analysis.symbol import SymbolAnalysis
@@ -72,6 +79,10 @@ class BarDecision:
     """Why nothing was traded, when nothing was traded. As useful as the trades."""
     trade_action: "TradeAction | None" = None
     """What trade management decided: open, hold, add, or which kind of exit."""
+    confidence: "Confidence | None" = None
+    """How strong the evidence was, with the contribution of each component kept."""
+    leverage: "LeverageDecision | None" = None
+    """What leverage confidence asked for, what was allowed, and which limit bound."""
 
     @property
     def acted(self) -> bool:
@@ -124,6 +135,15 @@ class Pipeline:
         )
         self.analysis: dict[str, SymbolAnalysis] = {}
         self.verdicts: dict[str, Verdict] = {}
+        #: Annualised funding carry per symbol, signed for a *long*. Populated from
+        #: outside because funding is a venue fact rather than something the analysis can
+        #: derive, and it is a real cost the confidence score should see.
+        self.funding_carry: dict[str, float] = {}
+        #: Maintenance margin per symbol, for the liquidation-distance cap. Falls back to
+        #: the module default when the contract is unknown.
+        self.maint_margin: dict[str, float] = {}
+        self.confidences: dict[str, Confidence] = {}
+        self.leverages: dict[str, LeverageDecision] = {}
         self.positions: dict[str, Position] = {}
         self.equity = self.settings.starting_equity
         self.start_equity = self.settings.starting_equity
@@ -221,8 +241,20 @@ class Pipeline:
         decision.target = target
 
         # --- money management
-        plan = self._size(bar, sa, target)
+        plan = self._size(bar, sa, target, decision)
         decision.plan = plan
+        if (
+            self.settings.confidence_leverage
+            and decision.confidence is not None
+            and not decision.confidence.tradable
+        ):
+            # A weak signal sized small is still a weak signal paying commission both
+            # ways, so it is refused rather than shrunk.
+            decision.rejected.append(
+                f"confidence {decision.confidence.score:.2f} below the tradable floor"
+            )
+            self.decisions.append(decision)
+            return decision
         if plan is None or not plan.approved:
             decision.rejected.append(
                 plan.refusal.value if plan is not None else "no stop available to size against"
@@ -372,6 +404,7 @@ class Pipeline:
         if stop <= 0:
             return None
         portfolio = self._portfolio_state()
+        leverage = self._sizing_leverage(bar, sa, side, stop, objective, source)
         plan = self.money.plan(
             symbol=bar.symbol,
             entry=entry,
@@ -379,11 +412,102 @@ class Pipeline:
             objective=objective,
             portfolio=portfolio,
             layer=layer,
-            leverage=self.settings.leverage,
+            leverage=leverage,
         )
         plan.notes = f"stop from {source}"
         return plan
 
+    # ------------------------------------------------------- confidence sizing
+    def _evidence_for(
+        self,
+        bar: Bar,
+        sa: SymbolAnalysis,
+        side: int,
+        stop: float,
+        objective: float,
+        source: str,
+    ) -> Evidence:
+        """Collect what is already known into a flat record for scoring.
+
+        Everything here was computed earlier in the bar. Nothing is recalculated, so the
+        score cannot disagree with the analysis the desk acted on.
+        """
+        verdict = self.verdicts.get(bar.symbol)
+        signals = self._latest_signals.get(bar.symbol, [])
+        weights = {a.name: a.weight for a in self.signal_agents}
+        total_weight = sum(weights.get(s.agent, 1.0) for s in signals) or 1.0
+        net = sum(
+            s.weighted_score * weights.get(s.agent, 1.0) for s in signals
+        ) / total_weight
+        # Consensus is measured *in the trade's direction*: agents agreeing on the
+        # opposite side is disagreement, not conviction.
+        directional = max(0.0, net * side)
+
+        permitted = sa.timeframes.permitted_direction()
+        wanted = Bias.BULLISH if side > 0 else Bias.BEARISH
+        aligned = permitted is wanted or permitted is Bias.NEUTRAL
+
+        risk_per_unit = abs(bar.close - stop)
+        reward_risk = (
+            abs(objective - bar.close) / risk_per_unit if risk_per_unit > 0 else 0.0
+        )
+        # Funding is quoted for a long; a short earns it, so the sign flips.
+        carry = self.funding_carry.get(bar.symbol, 0.0) * side
+
+        return Evidence(
+            checklist_conviction=verdict.conviction if verdict else 0.0,
+            checklist_agreement=getattr(verdict, "agreement", 0.0) if verdict else 0.0,
+            checklist_coverage=getattr(verdict, "coverage", 1.0) if verdict else 0.0,
+            agent_consensus=directional,
+            agent_count=len(signals),
+            timeframe_aligned=aligned,
+            pattern_reward_risk=reward_risk,
+            has_pattern_stop="pattern" in source,
+            regime_appetite=self._risk_appetite(),
+            funding_against=carry,
+            blockers=len(verdict.blockers) if verdict else 0,
+        )
+
+    def _leverage_for(
+        self, bar: Bar, confidence: Confidence, stop: float
+    ) -> LeverageDecision:
+        """Convert confidence into a multiplier the protective stop can survive."""
+        from quantdesk.alpha.confidence import DEFAULT_MAINT_MARGIN
+
+        distance = abs(bar.close - stop) / bar.close if bar.close > 0 else 0.0
+        return decide_leverage(
+            confidence.score,
+            stop_distance_pct=distance,
+            maint_margin_pct=self.maint_margin.get(bar.symbol, DEFAULT_MAINT_MARGIN),
+            user_cap=self.settings.max_leverage,
+        )
+
+    def _sizing_leverage(
+        self,
+        bar: Bar,
+        sa: SymbolAnalysis,
+        side: int,
+        stop: float,
+        objective: float,
+        source: str,
+        decision: BarDecision | None = None,
+    ) -> float:
+        """Leverage for this trade, and record how it was reached.
+
+        Returns the flat configured leverage when confidence sizing is off, so the
+        existing behaviour is untouched unless it is asked for explicitly.
+        """
+        if not self.settings.confidence_leverage:
+            return self.settings.leverage
+        evidence = self._evidence_for(bar, sa, side, stop, objective, source)
+        confidence = score_confidence(evidence)
+        leverage = self._leverage_for(bar, confidence, stop)
+        self.confidences[bar.symbol] = confidence
+        self.leverages[bar.symbol] = leverage
+        if decision is not None:
+            decision.confidence = confidence
+            decision.leverage = leverage
+        return leverage.leverage
     def _portfolio_state(self) -> PortfolioState:
         return PortfolioState(
             equity=self.equity,
@@ -399,7 +523,11 @@ class Pipeline:
 
     # ----------------------------------------------------------------- sizing
     def _size(
-        self, bar: Bar, sa: SymbolAnalysis, target: TargetPosition
+        self,
+        bar: Bar,
+        sa: SymbolAnalysis,
+        target: TargetPosition,
+        decision: BarDecision | None = None,
     ) -> PositionPlan | None:
         """Convert a target weight into a size with a real stop and objective.
 
@@ -427,6 +555,9 @@ class Pipeline:
             peak_equity=self.peak_equity,
             start_equity=self.start_equity,
         )
+        leverage = self._sizing_leverage(
+            bar, sa, 1 if long_side else -1, stop, objective, source, decision
+        )
         plan = self.money.plan(
             symbol=bar.symbol,
             entry=entry,
@@ -434,7 +565,7 @@ class Pipeline:
             objective=objective,
             portfolio=portfolio,
             conviction=min(1.0, abs(target.weight) / max(1e-9, self.settings.max_position_weight)),
-            leverage=self.settings.leverage,
+            leverage=leverage,
         )
         plan.notes = f"stop from {source}"
         return plan
