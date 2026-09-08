@@ -1,0 +1,21 @@
+# QuantDesk pinned dependencies (Python 3.10+)
+# Core numerics
+numpy==2.2.6
+pandas==2.3.3
+
+# Config / validation
+pydantic==2.12.5
+pydantic-settings==2.13.1
+python-dotenv==1.2.2
+
+# Market data + paper broker (official Alpaca SDK)
+alpaca-py==0.44.0
+
+# Terminal UI
+textual==8.2.8
+rich==14.3.3
+
+# Shiller's 1871-onward dataset is published as a pre-2007 .xls, which openpyxl
+# cannot open. Only needed for `quantdesk history --source shiller`; every other
+# command runs without it.
+xlrd==2.0.2

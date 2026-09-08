@@ -1,0 +1,4 @@
+# Optional: only needed if you enable the LLM research agent (QD_ENABLE_LLM_AGENT=true).
+# The core desk runs fine without this.
+-r requirements.txt
+openai==2.30.0

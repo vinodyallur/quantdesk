@@ -1,0 +1,19 @@
+[project]
+name = "quantdesk"
+version = "0.1.0"
+description = "A small systematic trading desk: agent-based market scanning, risk-managed paper execution, and a terminal UI."
+requires-python = ">=3.10"
+
+[project.scripts]
+quantdesk = "quantdesk.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["quantdesk*"]
+
+[tool.ruff]
+line-length = 95
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["B008"]

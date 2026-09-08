@@ -1,0 +1,529 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>QuantDesk - Paper Trading</title>
+<style>
+:root{--bg:#05070a;--pane:#080b11;--line:#1d2733;--head:#131b26;
+--fg:#c8d4e0;--dim:#667788;--amber:#ffb000;--up:#33dd77;--down:#ff5566}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);
+font:13px/1.45 "Cascadia Mono",Consolas,"SF Mono",Menlo,monospace}
+header{display:flex;align-items:center;gap:14px;padding:8px 14px;
+background:var(--head);border-bottom:1px solid var(--line)}
+header h1{margin:0;font-size:14px;color:var(--amber);letter-spacing:.5px}
+.badge{font-size:11px;color:var(--dim);border:1px solid var(--line);
+padding:2px 7px;border-radius:3px}
+.badge.live{color:var(--up);border-color:#1f8b4c}
+.badge.warn{color:var(--amber);border-color:#7a5200}
+.badge.dead{color:var(--down);border-color:#7a2933}
+#setup{display:flex;flex-wrap:wrap;gap:8px;align-items:center;
+padding:9px 14px;background:#0b1017;border-bottom:1px solid var(--line)}
+label{color:var(--dim);font-size:11px;text-transform:uppercase;letter-spacing:.6px}
+input,select{background:#10161f;color:var(--fg);border:1px solid var(--line);
+padding:5px 8px;font:inherit;border-radius:3px}
+input:focus,select:focus{outline:none;border-color:var(--amber)}
+input.cap{width:120px;text-align:right}
+input.sym{width:210px}
+button{background:#1d2733;color:var(--amber);border:1px solid var(--line);
+padding:5px 12px;font:inherit;font-weight:700;border-radius:3px;cursor:pointer}
+button:hover:not(:disabled){background:#2a3746}
+button:disabled{opacity:.4;cursor:not-allowed}
+button.go{background:#14532d;color:#a7f3c0;border-color:#1f7a45}
+button.go:hover:not(:disabled){background:#1d7a42}
+button.stop{background:#4a1520;color:#ffb3c0;border-color:#7a2933}
+main{display:grid;grid-template-columns:1fr 340px;gap:10px;padding:10px}
+.col{display:flex;flex-direction:column;gap:10px;min-width:0}
+.card{background:var(--pane);border:1px solid var(--line);border-radius:4px;
+overflow:hidden}
+.card>h2{margin:0;padding:5px 10px;font-size:11px;color:var(--amber);
+background:var(--head);border-bottom:1px solid var(--line);
+text-transform:uppercase;letter-spacing:.7px;display:flex;
+justify-content:space-between;align-items:center}
+.card>.body{padding:10px}
+canvas{display:block;width:100%}
+table{width:100%;border-collapse:collapse;font-size:12px}
+th{text-align:right;color:var(--dim);font-weight:400;font-size:10px;
+text-transform:uppercase;padding:3px 8px;border-bottom:1px solid var(--line)}
+th:first-child,td:first-child{text-align:left}
+td{text-align:right;padding:3px 8px;border-bottom:1px solid #0e141c}
+tbody tr:hover{background:#0e141c}
+.up{color:var(--up)}.down{color:var(--down)}.dim{color:var(--dim)}
+.amber{color:var(--amber)}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:2px 10px;font-size:12px}
+.kv dt{color:var(--dim)}
+.kv dd{margin:0;text-align:right;font-variant-numeric:tabular-nums}
+.big{font-size:20px;font-weight:700;font-variant-numeric:tabular-nums}
+#log{height:190px;overflow-y:auto;font-size:11px}
+#log div{padding:1px 10px;white-space:nowrap;overflow:hidden;
+text-overflow:ellipsis}
+#log .skip{color:var(--dim)}
+.note{font-size:11px;color:var(--dim);padding:8px 10px;line-height:1.5}
+.err{color:var(--down);padding:8px 10px;font-size:12px}
+.chips{display:flex;gap:6px;flex-wrap:wrap}
+.chip{font-size:11px;padding:2px 8px;border:1px solid var(--line);
+border-radius:10px;cursor:pointer;color:var(--dim)}
+.chip.on{color:var(--amber);border-color:var(--amber)}
+@media(max-width:1100px){main{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<header>
+  <h1>QUANTDESK</h1>
+  <span class="badge" id="st">idle</span>
+  <span class="badge" id="mode">demo money - simulated fills</span>
+  <span class="badge" id="clock"></span>
+  <span style="flex:1"></span>
+  <span class="badge">no real orders can be placed</span>
+</header>
+
+<div id="setup">
+  <label for="cap">demo balance</label>
+  <input id="cap" class="cap" value="100000" inputmode="decimal">
+  <label for="sym">perps</label>
+  <input id="sym" class="sym" value="BTC/USD,ETH/USD">
+  <label for="tf">bars</label>
+  <select id="tf">
+    <option value="1Min">1 minute</option>
+    <option value="5Min" selected>5 minutes</option>
+    <option value="15Min">15 minutes</option>
+    <option value="1Hour">1 hour</option>
+  </select>
+  <button class="go" id="start">START SESSION</button>
+  <button id="pause" disabled>PAUSE ENTRIES</button>
+  <button class="stop" id="kill" disabled>KILL</button>
+  <button id="stop" disabled>STOP</button>
+  <button id="reset" disabled>RESET</button>
+  <span id="msg" class="dim"></span>
+</div>
+
+<main>
+  <div class="col">
+    <div class="card">
+      <h2><span id="chartTitle">price</span><span class="chips" id="symChips"></span></h2>
+      <div class="body"><canvas id="price" height="330"></canvas></div>
+    </div>
+    <div class="card">
+      <h2>equity <span class="dim" id="eqNote"></span></h2>
+      <div class="body"><canvas id="equity" height="150"></canvas></div>
+    </div>
+    <div class="card">
+      <h2>closed trades</h2>
+      <div style="max-height:230px;overflow-y:auto">
+        <table><thead><tr>
+          <th>symbol</th><th>side</th><th>entry</th><th>exit</th>
+          <th>qty</th><th>P&amp;L</th><th>fees</th><th>closed</th>
+        </tr></thead><tbody id="trades"></tbody></table>
+      </div>
+    </div>
+    <div class="card">
+      <h2>activity <span class="dim">orders and refusals</span></h2>
+      <div id="log"></div>
+    </div>
+  </div>
+
+  <div class="col">
+    <div class="card">
+      <h2>account</h2>
+      <div class="body">
+        <div id="pnlBig" class="big dim">not started</div>
+        <div id="pnlPct" class="dim" style="margin-bottom:8px"></div>
+        <dl class="kv" id="acct"></dl>
+        <div id="acctErr" class="err"></div>
+      </div>
+    </div>
+    <div class="card">
+      <h2>positions</h2>
+      <table><thead><tr>
+        <th>symbol</th><th>qty</th><th>avg</th><th>last</th><th>unreal</th>
+      </tr></thead><tbody id="pos"></tbody></table>
+    </div>
+    <div class="card">
+      <h2>funding <span class="dim">live</span></h2>
+      <div class="body" id="funding"><span class="dim">waiting...</span></div>
+    </div>
+    <div class="card">
+      <h2>result</h2>
+      <div class="body"><dl class="kv" id="res"></dl><div id="resNote" class="note"></div></div>
+    </div>
+    <div class="card">
+      <h2>what this is</h2>
+      <div class="note">
+        Prices, funding and open interest are real and live from Binance USD-M
+        perpetual futures. No API key.<br><br>
+        Orders are <b>simulated</b> and fill at the <b>next bar's open</b>, never
+        the close the decision was made on. Filling at the decision price is how a
+        paper session shows an edge that is not there.<br><br>
+        The amber candle on the right is the bar still forming. The strategy never
+        sees it.
+      </div>
+    </div>
+  </div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const fmt = (n, d = 2) => (n == null || !isFinite(n)) ? "-" :
+  n.toLocaleString(undefined, {minimumFractionDigits: d, maximumFractionDigits: d});
+const sgn = (n, d = 2) => (n >= 0 ? "+" : "") + fmt(n, d);
+const pct = n => (n >= 0 ? "+" : "") + (n * 100).toFixed(2) + "%";
+const cls = n => n > 0 ? "up" : n < 0 ? "down" : "dim";
+
+let focus = null, state = {}, busy = false;
+
+// ---- canvas helpers -------------------------------------------------------
+// Backing store is scaled to devicePixelRatio; without it every line is soft on
+// any display that is not exactly 1x, which on a price chart reads as blur.
+function ctxFor(cv, cssHeight) {
+  const dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth || 800, h = cssHeight;
+  if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(h * dpr)) {
+    cv.width = Math.round(w * dpr);
+    cv.height = Math.round(h * dpr);
+    cv.style.height = h + "px";
+  }
+  const c = cv.getContext("2d");
+  c.setTransform(dpr, 0, 0, dpr, 0, 0);
+  c.clearRect(0, 0, w, h);
+  return {c, w, h};
+}
+
+function axisTicks(lo, hi, want) {
+  const span = hi - lo;
+  if (!(span > 0)) return [lo];
+  const raw = span / want;
+  const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  const step = [1, 2, 2.5, 5, 10].map(m => m * mag).find(s => s >= raw) || mag * 10;
+  const out = [];
+  for (let v = Math.ceil(lo / step) * step; v <= hi; v += step) out.push(v);
+  return out;
+}
+
+// ---- candlestick chart ---------------------------------------------------
+function drawCandles(chart) {
+  const cv = $("price");
+  const H = 330;
+  const {c, w, h} = ctxFor(cv, H);
+  const bars = (chart && chart.bars) || [];
+  if (!bars.length) {
+    c.fillStyle = "#667788"; c.font = "12px monospace";
+    c.fillText("waiting for bars from Binance...", 12, 24);
+    return;
+  }
+  const all = chart.forming ? bars.concat([chart.forming]) : bars.slice();
+  const padL = 8, padR = 74, padT = 10, padB = 22;
+  const plotW = w - padL - padR, plotH = h - padT - padB;
+
+  let lo = Infinity, hi = -Infinity;
+  for (const b of all) { if (b.l < lo) lo = b.l; if (b.h > hi) hi = b.h; }
+  const pad = (hi - lo) * 0.06 || 1;
+  lo -= pad; hi += pad;
+  const Y = p => padT + (1 - (p - lo) / (hi - lo)) * plotH;
+
+  // grid + price axis
+  c.font = "10px monospace"; c.textBaseline = "middle";
+  for (const t of axisTicks(lo, hi, 7)) {
+    const y = Y(t);
+    c.strokeStyle = "#131b26"; c.beginPath();
+    c.moveTo(padL, y); c.lineTo(padL + plotW, y); c.stroke();
+    c.fillStyle = "#667788"; c.textAlign = "left";
+    c.fillText(fmt(t, 2), padL + plotW + 6, y);
+  }
+
+  const step = plotW / all.length;
+  const bodyW = Math.max(1, Math.min(11, step * 0.68));
+  all.forEach((b, i) => {
+    const x = padL + i * step + step / 2;
+    const forming = chart.forming && i === all.length - 1;
+    const rising = b.c >= b.o;
+    const col = forming ? "#ffb000" : (rising ? "#33dd77" : "#ff5566");
+    c.strokeStyle = col; c.fillStyle = col;
+    c.beginPath();
+    c.moveTo(Math.round(x) + 0.5, Y(b.h));
+    c.lineTo(Math.round(x) + 0.5, Y(b.l));
+    c.stroke();
+    const yO = Y(b.o), yC = Y(b.c);
+    // A doji has open == close and rounds to zero height; force one pixel or the
+    // bar silently disappears from the chart.
+    const top = Math.min(yO, yC), hgt = Math.max(1, Math.abs(yC - yO));
+    c.fillRect(x - bodyW / 2, top, bodyW, hgt);
+  });
+
+  // last price marker
+  const last = all[all.length - 1];
+  const y = Y(last.c);
+  c.strokeStyle = "#ffb000"; c.setLineDash([3, 3]); c.beginPath();
+  c.moveTo(padL, y); c.lineTo(padL + plotW, y); c.stroke(); c.setLineDash([]);
+  c.fillStyle = "#ffb000"; c.fillRect(padL + plotW + 2, y - 8, padR - 4, 16);
+  c.fillStyle = "#05070a"; c.textAlign = "left";
+  c.fillText(fmt(last.c, 2), padL + plotW + 6, y);
+
+  c.fillStyle = "#667788"; c.textAlign = "left"; c.textBaseline = "alphabetic";
+  const t0 = new Date(bars[0].t), t1 = new Date(last.t);
+  c.fillText(t0.toLocaleString() + "  ->  " + t1.toLocaleTimeString() +
+             "   " + all.length + " bars" +
+             (chart.forming ? "   (last candle forming)" : ""), padL, h - 6);
+}
+
+// ---- equity chart --------------------------------------------------------
+function drawEquity(curve, baseline) {
+  const cv = $("equity");
+  const H = 150;
+  const {c, w, h} = ctxFor(cv, H);
+  if (!curve || curve.length < 2) {
+    c.fillStyle = "#667788"; c.font = "12px monospace";
+    c.fillText("equity curve builds as bars close", 12, 24);
+    return;
+  }
+  const padL = 8, padR = 74, padT = 10, padB = 18;
+  const plotW = w - padL - padR, plotH = h - padT - padB;
+  const vals = curve.map(p => p.e);
+  let lo = Math.min(...vals, baseline), hi = Math.max(...vals, baseline);
+  const pad = (hi - lo) * 0.12 || Math.max(1, baseline * 0.001);
+  lo -= pad; hi += pad;
+  const Y = v => padT + (1 - (v - lo) / (hi - lo)) * plotH;
+  const X = i => padL + (i / (curve.length - 1)) * plotW;
+
+  c.font = "10px monospace"; c.textBaseline = "middle";
+  for (const t of axisTicks(lo, hi, 4)) {
+    const y = Y(t);
+    c.strokeStyle = "#131b26"; c.beginPath();
+    c.moveTo(padL, y); c.lineTo(padL + plotW, y); c.stroke();
+    c.fillStyle = "#667788"; c.textAlign = "left";
+    c.fillText(fmt(t, 0), padL + plotW + 6, y);
+  }
+
+  // Starting balance, so "am I up" is answerable without reading the axis.
+  const yBase = Y(baseline);
+  c.strokeStyle = "#7f8ea0"; c.setLineDash([4, 4]); c.beginPath();
+  c.moveTo(padL, yBase); c.lineTo(padL + plotW, yBase); c.stroke();
+  c.setLineDash([]);
+
+  // Fill between the curve and the starting balance, not down to the floor:
+  // filling to the floor paints a winning session in the losing colour.
+  const up = vals[vals.length - 1] >= baseline;
+  c.beginPath();
+  c.moveTo(X(0), yBase);
+  curve.forEach((p, i) => c.lineTo(X(i), Y(p.e)));
+  c.lineTo(X(curve.length - 1), yBase);
+  c.closePath();
+  c.fillStyle = up ? "rgba(51,221,119,.20)" : "rgba(255,85,102,.20)";
+  c.fill();
+
+  c.beginPath();
+  curve.forEach((p, i) => i ? c.lineTo(X(i), Y(p.e)) : c.moveTo(X(i), Y(p.e)));
+  c.strokeStyle = up ? "#33dd77" : "#ff5566";
+  c.lineWidth = 1.5; c.stroke(); c.lineWidth = 1;
+
+  c.fillStyle = "#667788"; c.textAlign = "left"; c.textBaseline = "alphabetic";
+  c.fillText("dashed = your starting balance of " + fmt(baseline, 0), padL, h - 5);
+}
+
+// ---- rendering -----------------------------------------------------------
+function badge(el, text, kind) {
+  el.textContent = text;
+  el.className = "badge" + (kind ? " " + kind : "");
+}
+
+function render(s) {
+  state = s;
+  const running = s.status === "running";
+  badge($("st"), s.status + (s.paused ? " (paused)" : ""),
+        running ? (s.paused ? "warn" : "live") :
+        s.status === "failed" ? "dead" : "");
+  $("clock").textContent = new Date().toLocaleTimeString();
+  $("start").disabled = running || s.status === "starting";
+  $("pause").disabled = !running;
+  $("kill").disabled = !running;
+  $("stop").disabled = !running;
+  $("reset").disabled = running || s.status === "starting";
+  $("pause").textContent = s.paused ? "RESUME ENTRIES" : "PAUSE ENTRIES";
+
+  if (s.error) { $("acctErr").textContent = s.error; }
+  else { $("acctErr").textContent = ""; }
+
+  // symbol chips
+  const chips = $("symChips");
+  if (chips.dataset.for !== (s.symbols || []).join(",")) {
+    chips.dataset.for = (s.symbols || []).join(",");
+    chips.innerHTML = "";
+    (s.symbols || []).forEach(sym => {
+      const b = document.createElement("span");
+      b.className = "chip" + (sym === (focus || s.symbols[0]) ? " on" : "");
+      b.textContent = sym;
+      b.onclick = () => { focus = sym; tick(); };
+      chips.appendChild(b);
+    });
+  } else {
+    [...chips.children].forEach(ch =>
+      ch.className = "chip" + (ch.textContent === (focus || s.symbols[0]) ? " on" : ""));
+  }
+
+  if (s.chart) {
+    $("chartTitle").textContent = s.chart.symbol + "  " +
+      (s.chart.bars.length ? fmt(s.chart.bars[s.chart.bars.length - 1].c, 2) : "");
+    drawCandles(s.chart);
+  }
+  if (s.equity_curve) {
+    drawEquity(s.equity_curve, s.start_equity || s.capital);
+    $("eqNote").textContent = s.equity_curve.length + " marks";
+  }
+
+  if (s.equity != null) {
+    $("pnlBig").textContent = fmt(s.equity, 2);
+    $("pnlBig").className = "big " + cls(s.pnl);
+    $("pnlPct").innerHTML = '<span class="' + cls(s.pnl) + '">' +
+      sgn(s.pnl) + "  (" + pct(s.pnl_pct) + ")</span>";
+    $("acct").innerHTML = [
+      ["demo start", fmt(s.start_equity)],
+      ["cash", fmt(s.cash)],
+      ["unrealised", '<span class="' + cls(s.unrealized) + '">' + sgn(s.unrealized) + "</span>"],
+      ["realised", '<span class="' + cls(s.realized) + '">' + sgn(s.realized) + "</span>"],
+      ["fees", '<span class="down">' + fmt(s.fees) + "</span>"],
+      ["bars seen", s.bars],
+      ["pending", s.pending],
+      ["risk", s.risk_state],
+      ["mode", s.mode || "-"],
+    ].map(([k, v]) => "<dt>" + k + "</dt><dd>" + v + "</dd>").join("");
+  }
+
+  $("pos").innerHTML = (s.positions && s.positions.length)
+    ? s.positions.map(p => "<tr><td class='amber'>" + p.symbol + "</td><td class='" +
+        cls(p.qty) + "'>" + sgn(p.qty, 6) + "</td><td>" + fmt(p.avg) +
+        "</td><td>" + fmt(p.last) + "</td><td class='" + cls(p.unrealized) + "'>" +
+        sgn(p.unrealized) + "</td></tr>").join("")
+    : "<tr><td class='dim' colspan='5'>flat</td></tr>";
+
+  $("trades").innerHTML = (s.trades && s.trades.length)
+    ? s.trades.map(t => "<tr><td class='amber'>" + t.symbol + "</td><td class='" +
+        (t.side === "long" ? "up" : "down") + "'>" + t.side + "</td><td>" +
+        fmt(t.entry) + "</td><td>" + fmt(t.exit) + "</td><td>" + fmt(t.qty, 4) +
+        "</td><td class='" + cls(t.pnl) + "'>" + sgn(t.pnl) + "</td><td class='dim'>" +
+        fmt(t.fees) + "</td><td class='dim'>" + t.closed + "</td></tr>").join("")
+    : "<tr><td class='dim' colspan='8'>no round trip has completed yet</td></tr>";
+
+  const fd = s.funding || {};
+  const keys = Object.keys(fd);
+  $("funding").innerHTML = keys.length ? keys.map(k => {
+    const f = fd[k];
+    const crowded = f.lean.indexOf("crowded") === 0;
+    return "<div style='margin-bottom:10px'><div class='amber'>" + k + "</div>" +
+      "<dl class='kv'>" +
+      "<dt>rate now</dt><dd class='" + (f.rate > 0 ? "down" : "up") + "'>" +
+        (f.rate * 100).toFixed(4) + "%</dd>" +
+      "<dt>annualised</dt><dd class='" + (f.rate > 0 ? "down" : "up") + "'>" +
+        pct(f.rate_annualised) + "</dd>" +
+      "<dt>a long pays</dt><dd class='" + (f.carry > 0 ? "down" : "up") + "'>" +
+        pct(f.carry) + "/yr</dd>" +
+      "<dt>longs paid</dt><dd>" + (f.positive_share * 100).toFixed(0) + "% of " +
+        f.settlements + "</dd>" +
+      "<dt>lean</dt><dd class='" + (crowded ? "amber" : "dim") + "'>" + f.lean + "</dd>" +
+      (f.oi_reading ? "<dt>open interest</dt><dd>" + f.oi_reading + "</dd>" : "") +
+      "</dl></div>";
+  }).join("") : "<span class='dim'>waiting for funding...</span>";
+
+  const r = s.results;
+  if (r) {
+    $("res").innerHTML = [
+      ["P&L", '<span class="' + cls(r.total_pnl) + '">' + sgn(r.total_pnl) + "</span>"],
+      ["return", '<span class="' + cls(r.total_pnl) + '">' + pct(r.total_return) + "</span>"],
+      ["trades", r.trades + "  (" + r.wins + "W / " + r.losses + "L)"],
+      ["hit rate", (r.hit_rate * 100).toFixed(1) + "%"],
+      ["best", '<span class="up">' + sgn(r.best) + "</span>"],
+      ["worst", '<span class="down">' + sgn(r.worst) + "</span>"],
+      ["fills", r.fills],
+      ["drawdown", (r.max_drawdown * 100).toFixed(2) + "%"],
+      ["fees", fmt(r.fees_paid)],
+      ["before costs", sgn(r.net_of_fees)],
+    ].map(([k, v]) => "<dt>" + k + "</dt><dd>" + v + "</dd>").join("");
+    let note = "";
+    if (r.trades === 0) {
+      note = "No round trip has completed yet. The 3:1 reward-to-risk gate " +
+             "declines most setups by design, so quiet stretches are the " +
+             "strategy working rather than something being broken.";
+    } else if (r.fees_paid > Math.abs(r.total_pnl) * 0.5) {
+      note = "Fees are more than half the size of the P&L. At this trade " +
+             "frequency costs dominate, not the signal.";
+    }
+    $("resNote").textContent = note;
+  }
+
+  $("log").innerHTML = (s.log || []).slice().reverse().map(e =>
+    e.kind === "order"
+      ? "<div><span class='dim'>" + e.ts + "</span> <span class='amber'>" +
+        e.symbol + "</span> <span class='" + (e.side === "buy" ? "up" : "down") +
+        "'>" + e.side.toUpperCase() + "</span> " + fmt(e.qty, 6) +
+        " <span class='dim'>risk " + fmt(e.risk, 0) + " - " + e.text + "</span></div>"
+      : "<div class='skip'>" + e.ts + " " + e.symbol + " skip - " + e.text + "</div>"
+  ).join("");
+}
+
+// ---- polling and controls ------------------------------------------------
+async function tick() {
+  try {
+    const q = focus ? "?focus=" + encodeURIComponent(focus) : "";
+    const res = await fetch("/api/state" + q);
+    render(await res.json());
+  } catch (e) {
+    badge($("st"), "server unreachable", "dead");
+  }
+}
+
+async function post(path, body) {
+  if (busy) return;
+  busy = true;
+  $("msg").textContent = "working...";
+  $("msg").className = "dim";
+  try {
+    const res = await fetch(path, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(body || {}),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      $("msg").textContent = data.error || ("HTTP " + res.status);
+      $("msg").className = "down";
+    } else {
+      $("msg").textContent = data.detail || "ok";
+      $("msg").className = "up";
+    }
+  } catch (e) {
+    $("msg").textContent = String(e);
+    $("msg").className = "down";
+  } finally {
+    busy = false;
+    tick();
+  }
+}
+
+$("start").onclick = () => {
+  const cap = $("cap").value.replace(/,/g, "");
+  if (!(parseFloat(cap) > 0)) {
+    $("msg").textContent = "demo balance must be a positive number";
+    $("msg").className = "down";
+    return;
+  }
+  focus = null;
+  $("msg").textContent = "connecting to Binance and warming up indicators...";
+  post("/api/start", {
+    capital: cap,
+    symbols: $("sym").value,
+    timeframe: $("tf").value,
+  });
+};
+$("pause").onclick = () => post("/api/pause");
+$("kill").onclick = () => {
+  if (confirm("Cancel working orders and halt new entries?\n\nExits stay allowed.")) {
+    post("/api/kill");
+  }
+};
+$("stop").onclick = () => post("/api/stop");
+$("reset").onclick = () => { focus = null; post("/api/reset"); };
+window.addEventListener("resize", () => render(state));
+
+tick();
+setInterval(tick, 2000);
+</script>
+</body>
+</html>

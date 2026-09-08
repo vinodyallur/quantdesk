@@ -1,0 +1,37 @@
+.venv/
+__pycache__/
+*.py[cod]
+.env
+data/
+*.sqlite
+*.sqlite-journal
+*.log
+reports/
+.pytest_cache/
+.ruff_cache/
+
+# Extracted book text. These are full-text extractions of copyrighted works
+# (Murphy, "Technical Analysis of the Financial Markets"; Douglas, "Trading in the
+# Zone") used locally to source parameters and quotations. They must never be
+# committed or published - the parameters derived from them live in the source, the
+# books do not.
+_book.txt
+_book_epub.txt
+_zone.txt
+_ch/
+
+# Generated artefacts and local scratch. Anchored to the repo root, and __init__.py
+# is protected explicitly: an unanchored "_*.py" also matches "__init__.py" and
+# quietly excludes every package initialiser, which publishes a broken package.
+/_shots/
+/_t.py
+/_x.py
+/_probe*.py
+/_check*.py
+/_diag*.py
+/_shot*.py
+/_paper*.py
+/_chart*.py
+/_gap*.py
+/_phantom*.py
+!**/__init__.py
